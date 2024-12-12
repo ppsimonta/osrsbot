@@ -3,7 +3,7 @@ import mwparserfromhell
 import discord
 from discord.ext import commands
 
-TOKEN = 'your token'
+TOKEN = 'Your token'
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -15,64 +15,54 @@ def get_all_bosses():
         'User-Agent': 'pera',
         'From': 'perttu.simontaival@gmail.com'
     }
-    # API-kyselyn parametrit Category:Bosses-sivulle
     parameters = {
         'action': 'query',
         'list': 'categorymembers',
         'cmtitle': 'Category:Bosses',
         'format': 'json',
-        'cmtype': 'page',  # Vain sivut, ei alikategoriat
-        'cmlimit': 'max'  # Hakee niin monta sivua kuin mahdollista
+        'cmtype': 'page',
+        'cmlimit': 'max'
     }
 
-    # API-kutsu
     result = requests.get("https://oldschool.runescape.wiki/api.php", headers=custom_agent, params=parameters).json()
 
     if 'query' not in result:
         return "Pyyntö ei tuottanut tuloksia."
 
-    # Lista, johon tallennetaan kaikki bossit
     bosses = []
 
     for page in result['query']['categorymembers']:
         bosses.append(page['title'])
-
 
     return bosses
 
 
 # Funktio, joka hakee bossit, jotka alkavat tietyllä kirjaimella
 def get_bosses_by_letter(bosses, letter):
-    # Suodatetaan kaikki bossit, jotka alkavat annetulla kirjaimella
     filtered_bosses = [boss for boss in bosses if boss.lower().startswith(letter.lower())]
     return filtered_bosses
 
 
 def get_boss_details(boss_name):
-    # Määritä käyttäjäagentti
     custom_agent = {
         'User-Agent': 'pera',
         'From': 'perttu.simontaival@gmail.com'
     }
 
-    # Pienet sanat, jotka jätetään pieniksi
     small_words = {'of', 'the', 'archaeologist', 'deathless', 'twisted', 'maledictus', 'brothers', 'demon', 'kill', 'spirit', 'golem'}
 
-    # Muokataan syöte niin, että ensimmäinen kirjain on isolla kaikissa sanoissa, mutta pienet sanat jätetään pieniksi
     boss = "_".join(
         word.lower() if word.lower() in small_words else word[0].upper() + word[1:].lower()
         for word in boss_name.strip().split()
     )
 
-    # API-kyselyn parametrit
     parameters = {
         'action': 'parse',
         'prop': 'wikitext',
         'format': 'json',
-        'page': boss  
+        'page': boss
     }
 
-    # API-kutsu
     result = requests.get("https://oldschool.runescape.wiki/api.php", headers=custom_agent, params=parameters).json()
 
     if 'parse' not in result:
@@ -86,7 +76,6 @@ def get_boss_details(boss_name):
 
     templates = wikicode.filter_templates()
 
-    # Käytetään setiä estämään duplikaattien lisääminen
     seen_attributes = set()
 
     for template in templates:
@@ -113,58 +102,96 @@ def get_boss_details(boss_name):
     return result_details if result_details else "No relevant data found"
 
 
+# State management for user
+user_state = {}
 
 @bot.command()
 async def boss(ctx):
+    """Start the boss selection process"""
+    user_state[ctx.author.id] = {"step": "boss", "attempts": 0}
     await ctx.send("Anna bossin alkukirjain:")
 
-    def check(m):
-        return m.author == ctx.author and len(m.content) == 1 and m.content.isalpha()
+@bot.event
+async def on_message(user_message):
+    if user_message.author.bot:
+        return
 
-    try:
-        letter_msg = await bot.wait_for('message', check=check, timeout=30)
-        letter = letter_msg.content.lower()
-        
-        # Hae kaikki bossit ja suodata ne kirjaimen mukaan
-        bosses = get_all_bosses()
-        filtered_bosses = get_bosses_by_letter(bosses, letter)
-        
-        if not filtered_bosses:
-            await ctx.send(f"Ei löytynyt bossia, joka alkaa kirjaimella {letter.upper()}.")
+    user_id = user_message.author.id
+    if user_id in user_state:
+        state = user_state[user_id]
+
+        if state["step"] == "boss":
+            # Tarkistetaan, onko syöte yksi kirjain
+            letter = user_message.content.strip().lower()
+            if len(letter) != 1 or not letter.isalpha():
+                await user_message.channel.send("Virheellinen syöte! Syötä vain yksi kirjain. Keskustelu päättyi.")
+                del user_state[user_id]
+                return
+
+            # Tallennetaan valittu kirjain tilaan
+            state["letter"] = letter
+
+            bosses = get_all_bosses()
+            filtered_bosses = get_bosses_by_letter(bosses, letter)
+
+            if not filtered_bosses:
+                await user_message.channel.send(f"Ei löytynyt bossia, joka alkaa kirjaimella {letter.upper()}.")
+                del user_state[user_id]
+                return
+
+            message = f"Bossit, jotka alkavat kirjaimella {letter.upper()}:\n"
+            for i, boss in enumerate(filtered_bosses, 1):
+                message += f"{i}. {boss}\n"
+                if len(message) > 2000:  # Jos viesti on liian pitkä
+                    await user_message.channel.send(message)
+                    message = ""
+
+            if message:
+                await user_message.channel.send(message)
+
+            await user_message.channel.send("Valitse bossi numerolla:")
+
+            # Siirretään käyttäjä numerovaiheeseen
+            state["step"] = "number"
             return
-        
-        # Näytetään bossit, jaetaan useampaan viestiin, jos lista on liian pitkä
-        message = f"Bossit, jotka alkavat kirjaimella {letter.upper()}:\n"
-        for i, boss in enumerate(filtered_bosses, 1):
-            message += f"{i}. {boss}\n"
-            if len(message) > 2000:  # Jos viesti on liian pitkä, lähetetään se ja aloitetaan uusi
-                await ctx.send(message)
-                message = ""
-        
-        if message:
-            await ctx.send(message)
 
-        await ctx.send("Valitse bossi numerolla:")
+        elif state["step"] == "number":
+            try:
+                # Tarkistetaan, että syöte on kokonaisluku
+                boss_index = int(user_message.content.strip()) - 1
 
-        def number_check(m):
-            return m.author == ctx.author and m.content.isdigit() and 1 <= int(m.content) <= len(filtered_bosses)
+                # Suodatetaan valitun numeron mukaan
+                filtered_bosses = get_bosses_by_letter(get_all_bosses(), state["letter"])
 
-        # Odotetaan valintaa
-        number_msg = await bot.wait_for('message', check=number_check, timeout=30)
-        boss_index = int(number_msg.content) - 1
-        selected_boss = filtered_bosses[boss_index]
-        
-        # Haetaan valitun bossin tiedot
-        boss_details = get_boss_details(selected_boss)
-        if boss_details.startswith("Pyyntö ei tuottanut tuloksia"):
-            await ctx.send(f"Virhe: {boss_details}")
-        else:
-            await ctx.send(f"Tiedot {selected_boss}:\n{boss_details}")
-    
-    except Exception as e:
-        await ctx.send(f"Virhe: {e}")
+                if boss_index < 0 or boss_index >= len(filtered_bosses):
+                    await user_message.channel.send(f"Virheellinen numero! Valitse numero välillä 1 ja {len(filtered_bosses)}. Keskustelu päättyi.")
+                    del user_state[user_id]
+                    return
 
-#info command
+                selected_boss = filtered_bosses[boss_index]
+                boss_details = get_boss_details(selected_boss)
+
+                if boss_details.startswith("Pyyntö ei tuottanut tuloksia"):
+                    await user_message.channel.send(f"Virhe: {boss_details}")
+                else:
+                    await user_message.channel.send(f"Tiedot {selected_boss}:\n{boss_details}")
+
+                # Lopetetaan vuorovaikutus tämän käyttäjän kanssa
+                del user_state[user_id]
+
+            except ValueError:
+                # Syöte ei ollut numero
+                await user_message.channel.send("Virheellinen syöte! Syötä vain numero. Vuorovaikutus lopetetaan.")
+                del user_state[user_id]
+
+        return
+
+    await bot.process_commands(user_message)
+
+
+
+
+
 @bot.command()
 async def coms(ctx):
     embed = discord.Embed(title="Bot Commands", description="List of commands for the bot", color=0x00ff00)
