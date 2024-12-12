@@ -1,13 +1,52 @@
 import requests
-import re
+import mwparserfromhell
 import discord
 from discord.ext import commands
 
-TOKEN = 'asdasd'
+TOKEN = 'your token'
 
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
+
+# Funktio, joka hakee kaikki bossit Category:Bosses-kategoriasta
+def get_all_bosses():
+    custom_agent = {
+        'User-Agent': 'pera',
+        'From': 'perttu.simontaival@gmail.com'
+    }
+    # API-kyselyn parametrit Category:Bosses-sivulle
+    parameters = {
+        'action': 'query',
+        'list': 'categorymembers',
+        'cmtitle': 'Category:Bosses',
+        'format': 'json',
+        'cmtype': 'page',  # Vain sivut, ei alikategoriat
+        'cmlimit': 'max'  # Hakee niin monta sivua kuin mahdollista
+    }
+
+    # API-kutsu
+    result = requests.get("https://oldschool.runescape.wiki/api.php", headers=custom_agent, params=parameters).json()
+
+    if 'query' not in result:
+        return "Pyyntö ei tuottanut tuloksia."
+
+    # Lista, johon tallennetaan kaikki bossit
+    bosses = []
+
+    for page in result['query']['categorymembers']:
+        bosses.append(page['title'])
+
+
+    return bosses
+
+
+# Funktio, joka hakee bossit, jotka alkavat tietyllä kirjaimella
+def get_bosses_by_letter(bosses, letter):
+    # Suodatetaan kaikki bossit, jotka alkavat annetulla kirjaimella
+    filtered_bosses = [boss for boss in bosses if boss.lower().startswith(letter.lower())]
+    return filtered_bosses
+
 
 def get_boss_details(boss_name):
     # Määritä käyttäjäagentti
@@ -34,67 +73,93 @@ def get_boss_details(boss_name):
     }
 
     # API-kutsu
-    response = requests.get("https://oldschool.runescape.wiki/api.php", headers=custom_agent, params=parameters)
+    result = requests.get("https://oldschool.runescape.wiki/api.php", headers=custom_agent, params=parameters).json()
 
-    if response.status_code == 200:
-        data = response.json()
-        
-        if 'parse' not in data:
-            return "Pyyntö ei tuottanut tuloksia. Tarkista nimen oikeinkirjoitus."
+    if 'parse' not in result:
+        return "Pyyntö ei tuottanut tuloksia."
 
-        wikitext = data['parse']['wikitext']['*']  # Poimitaan wikitext
+    data = result['parse']['wikitext']['*'].encode('utf-8')
 
-        # Regex Infobox Monster -osion tunnistamiseen
-        infobox_match = re.search(r'{{Infobox Monster.*?}}', wikitext, re.DOTALL)
+    wikicode = mwparserfromhell.parse(data)
 
-        if infobox_match:
-            infobox_content = infobox_match.group(0)  # Poimitaan Infobox Monster
-            
-            # Regex haluttujen kenttien poimimiseen
-            fields_to_extract = [
-                r'\|dstab = .*',
-                r'\|dslash = .*',
-                r'\|dcrush = .*',
-                r'\|dmagic = .*',
-                r'\|drange = .*',
-                r'\|elementalweaknesstype = .*',
-                r'\|elementalweaknesspercent = .*',
-                r'\|immunepoison = .*',
-                r'\|immunevenom = .*',
-                r'\|immunecannon = .*',
-                r'\|immunethrall = .*',
-                r'\|freezeresistance = .*'
-            ]
-            
-            extracted_data = []
-            for field in fields_to_extract:
-                match = re.search(field, infobox_content)
-                if match:
-                    # Poistetaan alkaviiva ja "d" edestä
-                    result = match.group(0).replace('|', '').replace('d', '', 1).strip()
+    result_details = ""
 
-                    # Muutetaan ensimmäinen kirjain isoksi ja loput pieniksi
-                    result = result[0].upper() + result[1:].lower()
+    templates = wikicode.filter_templates()
 
-                    extracted_data.append(result)
+    # Käytetään setiä estämään duplikaattien lisääminen
+    seen_attributes = set()
 
-            return "\n".join(extracted_data)
-        else:
-            return "Infobox Monsteria ei löytynyt wikitextistä."
-    else:
-        return f"API-kutsu epäonnistui. Statuskoodi: {response.status_code}"
+    for template in templates:
+        template_name = template.name.strip().lower()
+
+        if "infobox monster" in template_name:
+            attributes = {
+                "Stab": template.get("dstab").value.strip() if template.has("dstab") and template.get("dstab").value.strip() != "N/A" else None,
+                "Slash": template.get("dslash").value.strip() if template.has("dslash") and template.get("dslash").value.strip() != "N/A" else None,
+                "Crush": template.get("dcrush").value.strip() if template.has("dcrush") and template.get("dcrush").value.strip() != "N/A" else None,
+                "Magic": template.get("dmagic").value.strip() if template.has("dmagic") and template.get("dmagic").value.strip() != "N/A" else None,
+                "Range": template.get("drange").value.strip() if template.has("drange") and template.get("drange").value.strip() != "N/A" else None,
+                "Poison Immunity": template.get("immunepoison").value.strip() if template.has("immunepoison") else None,
+                "Venom Immunity": template.get("immunevenom").value.strip() if template.has("immunevenom") else None,
+                "Cannon Immunity": template.get("immunecannon").value.strip() if template.has("immunecannon") else None,
+                "Thrall Immunity": template.get("immunethrall").value.strip() if template.has("immunethrall") else None
+            }
+
+            for key, value in attributes.items():
+                if value and key not in seen_attributes:
+                    seen_attributes.add(key)
+                    result_details += f"{key}: {value}\n"
+
+    return result_details if result_details else "No relevant data found"
+
+
 
 @bot.command()
-async def boss(ctx, *, arg):
-    try:
-        boss_name = arg.strip()
+async def boss(ctx):
+    await ctx.send("Anna bossin alkukirjain:")
 
-        boss_details = get_boss_details(boss_name)
+    def check(m):
+        return m.author == ctx.author and len(m.content) == 1 and m.content.isalpha()
+
+    try:
+        letter_msg = await bot.wait_for('message', check=check, timeout=30)
+        letter = letter_msg.content.lower()
         
+        # Hae kaikki bossit ja suodata ne kirjaimen mukaan
+        bosses = get_all_bosses()
+        filtered_bosses = get_bosses_by_letter(bosses, letter)
+        
+        if not filtered_bosses:
+            await ctx.send(f"Ei löytynyt bossia, joka alkaa kirjaimella {letter.upper()}.")
+            return
+        
+        # Näytetään bossit, jaetaan useampaan viestiin, jos lista on liian pitkä
+        message = f"Bossit, jotka alkavat kirjaimella {letter.upper()}:\n"
+        for i, boss in enumerate(filtered_bosses, 1):
+            message += f"{i}. {boss}\n"
+            if len(message) > 2000:  # Jos viesti on liian pitkä, lähetetään se ja aloitetaan uusi
+                await ctx.send(message)
+                message = ""
+        
+        if message:
+            await ctx.send(message)
+
+        await ctx.send("Valitse bossi numerolla:")
+
+        def number_check(m):
+            return m.author == ctx.author and m.content.isdigit() and 1 <= int(m.content) <= len(filtered_bosses)
+
+        # Odotetaan valintaa
+        number_msg = await bot.wait_for('message', check=number_check, timeout=30)
+        boss_index = int(number_msg.content) - 1
+        selected_boss = filtered_bosses[boss_index]
+        
+        # Haetaan valitun bossin tiedot
+        boss_details = get_boss_details(selected_boss)
         if boss_details.startswith("Pyyntö ei tuottanut tuloksia"):
             await ctx.send(f"Virhe: {boss_details}")
         else:
-            await ctx.send(f"Tiedot {boss_name}:\n{boss_details}")
+            await ctx.send(f"Tiedot {selected_boss}:\n{boss_details}")
     
     except Exception as e:
         await ctx.send(f"Virhe: {e}")
@@ -103,25 +168,7 @@ async def boss(ctx, *, arg):
 @bot.command()
 async def coms(ctx):
     embed = discord.Embed(title="Bot Commands", description="List of commands for the bot", color=0x00ff00)
-    embed.add_field(name="!boss <boss_name>", value="Get information about a boss", inline=False)
+    embed.add_field(name="!boss", value="Get information about a boss by selecting it from a list", inline=False)
     await ctx.send(embed=embed)
 
 bot.run(TOKEN)
-
-if __name__ == "__main__":
-    import sys
-    if len(sys.argv) > 1 and sys.argv[1] == "test":
-        try:
-            # Pyydetään käyttäjältä syöte konsolista
-            boss_name = input("Anna haettavan bossin nimi: ")
-            print(boss_name)
-
-            # Hae bossin tiedot ja tulosta ne konsoliin
-            result = get_boss_details(boss_name)
-            print(f"Tulos:\n{result}\n")
-
-        except Exception as e:
-            print("Tapahtui virhe:", e)
-    else:
-        # Jos ei ole "test"-komentoa, suoritetaan Discord-botti
-        bot.run(TOKEN)
